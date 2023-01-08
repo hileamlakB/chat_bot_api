@@ -1,114 +1,118 @@
-const express = require("express");
-const morgan = require("morgan");
-const helmet = require("helmet");
-const cors = require("cors");
-const axios = require("axios").default;
-const { Client } = require("elasticsearch");
+const express = require('express')
+const morgan = require('morgan')
+const helmet = require('helmet')
+const cors = require('cors')
+const axios = require('axios').default
+// const { Client } = require('elasticsearch')
+const { connectToRedis } = require('../chatbot/redis')
 
-require("dotenv").config();
+require('dotenv').config()
 
-const app = express();
+const app = express()
 
-app.use(morgan("dev"));
-app.use(helmet());
-app.use(cors());
-app.use(express.json());
+app.use(morgan('dev'))
+app.use(helmet())
+app.use(cors())
+app.use(express.json())
 
-const client = new Client({
-  host: process.env.ES_HOST,
-});
+let redisClient = null
 
-client.ping(function (error) {
-  if (error) {
-    console.error("Elasticsearch cluster is down!");
-  } else {
-    console.log("Elasticsearch is connected");
-  }
-});
+connectToRedis().then((client) => (redisClient = client))
 
 // Accepts POST requests at /webhook endpoint
-app.post("/api/webhook", async (req, res) => {
+app.post('/api/webhook', async (req, res) => {
   try {
     // Parse the request body from the POST
-    const body = req.body;
+    const body = req.body
 
     // Check the Incoming webhook message
-    console.log("Incoming webhook: " + JSON.stringify(body));
+    console.log('Incoming webhook: ' + JSON.stringify(body))
 
     // Validate the webhook
     if (req.body.object) {
       // Handle the event
-      if (req.body.object === "whatsapp_business_account") {
-        const entry = req.body.entry[0];
+      if (req.body.object === 'whatsapp_business_account') {
+        const entry = req.body.entry[0]
 
         // Handle the message
         if (entry.changes) {
           for (const change of entry.changes) {
             if (
               change.value &&
-              change.field === "messages" &&
+              change.field === 'messages' &&
               change.value.contacts &&
               change.value.messages
             ) {
               // Handle the value
-              const value = change.value;
+              const value = change.value
 
-              const userName = value.contacts[0].profile.name;
+              const userName = value.contacts[0].profile.name
 
-              const messages = value.messages;
+              const messages = value.messages
 
               // Handle messages
               for (const message of messages) {
                 if (
-                  message.type === "text" &&
+                  message.type === 'text' &&
                   message.text &&
                   message.text.body
                 ) {
-                  const waid = message.from;
-                  const text = message.text.body;
-                  const msgId = message.id;
+                  const waid = message.from
+                  const text = message.text.body
+                  const msgId = message.id
                   console.log(
-                    "Message from " + waid + " - " + userName + ": " + text
-                  );
+                    'Message from ' + waid + ' - ' + userName + ': ' + text,
+                  )
 
                   try {
                     await axios.post(
                       process.env.WHATSAPP_SEND_MESSAGE_API,
                       {
-                        messaging_product: "whatsapp",
-                        status: "read",
+                        messaging_product: 'whatsapp',
+                        status: 'read',
                         message_id: msgId,
                       },
                       {
                         headers: {
-                          Authorization: "Bearer " + process.env.WHATSAPP_TOKEN,
+                          Authorization: 'Bearer ' + process.env.WHATSAPP_TOKEN,
                         },
-                      }
-                    );
+                      },
+                    )
                   } catch (error) {
                     console.error(
-                      "Error while sending status message to whatsapp: " + error
-                    );
+                      'Error while sending status message to whatsapp: ' +
+                        error,
+                    )
                   }
 
                   try {
-                    await client.index({
-                      index: "messages",
-                      body: {
-                        type: "USER",
+                    await redisClient.lpush(
+                      waid,
+                      JSON.stringify({
+                        type: 'USER',
                         phonenumber: waid,
                         text: text,
                         userName: userName,
                         timestamp: new Date(),
-                      },
-                    });
+                      }),
+                    )
+                    // await client.index({
+                    //   index: 'messages',
+                    //   body: {
+                    //     type: 'USER',
+                    //     phonenumber: waid,
+                    //     text: text,
+                    //     userName: userName,
+                    //     timestamp: new Date(),
+                    //   },
+                    // })
                   } catch (error) {
                     console.error(
-                      "Error while indexing message to Elasticsearch: " + error
-                    );
+                      'Error while indexing message to Elasticsearch: ' + error,
+                    )
                   }
 
-                  let reply = "";
+                  let reply = ''
 
                   try {
                     const chatbotResponse = await axios.post(
@@ -119,36 +123,36 @@ app.post("/api/webhook", async (req, res) => {
                       },
                       {
                         headers: {
-                          "Content-Type": "application/json",
+                          'Content-Type': 'application/json',
                         },
-                      }
-                    );
+                      },
+                    )
 
-                    reply = chatbotResponse.data.reply;
+                    reply = chatbotResponse.data.reply
                   } catch (chatbotError) {
                     console.error(
-                      "Error while receiving message from Chatbot: " +
-                        chatbotError
-                    );
+                      'Error while receiving message from Chatbot: ' +
+                        chatbotError,
+                    )
 
                     reply =
-                      "Sorry, I am not able to reply to your message right now. Please try again later.\n";
+                      'Sorry, I am not able to reply to your message right now. Please try again later.\n'
                   }
 
-                  console.log("Replying to " + waid + ": " + reply);
+                  console.log('Replying to ' + waid + ': ' + reply)
 
                   // Send reply to user
 
-                  reply = reply + "\n *_Powered by Linode_*";
+                  reply = reply + '\n *_Powered by Linode_*'
 
                   try {
                     await axios.post(
                       process.env.WHATSAPP_SEND_MESSAGE_API,
                       {
-                        messaging_product: "whatsapp",
-                        recipient_type: "individual",
+                        messaging_product: 'whatsapp',
+                        recipient_type: 'individual',
                         to: waid,
-                        type: "text",
+                        type: 'text',
                         text: {
                           preview_url: false,
                           body: reply,
@@ -156,32 +160,32 @@ app.post("/api/webhook", async (req, res) => {
                       },
                       {
                         headers: {
-                          Authorization: "Bearer " + process.env.WHATSAPP_TOKEN,
+                          Authorization: 'Bearer ' + process.env.WHATSAPP_TOKEN,
                         },
-                      }
-                    );
+                      },
+                    )
                     try {
-                      await client.index({
-                        index: "messages",
-                        body: {
-                          type: "BOT",
+                      redisClient.lpush(
+                        waid,
+                        JSON.stringify({
+                          type: 'BOT',
                           phonenumber: waid,
                           text: reply,
                           userName: userName,
                           timestamp: new Date(),
-                        },
-                      });
+                        }),
+                      )
                     } catch (error) {
                       console.error(
-                        "Error while indexing message to Elasticsearch: " +
-                          error
-                      );
+                        'Error while indexing message to Elasticsearch: ' +
+                          error,
+                      )
                     }
                   } catch (whatsappSendError) {
                     console.error(
-                      "Error while sending message to whatsapp: " +
-                        JSON.stringify(whatsappSendError.response.data)
-                    );
+                      'Error while sending message to whatsapp: ' +
+                        JSON.stringify(whatsappSendError.response.data),
+                    )
                   }
                 }
               }
@@ -190,45 +194,45 @@ app.post("/api/webhook", async (req, res) => {
         }
       }
 
-      res.sendStatus(200);
+      res.sendStatus(200)
     } else {
       // Return a '404 Not Found' if event is not from a whatsApp API
-      res.sendStatus(404);
+      res.sendStatus(404)
     }
   } catch (err) {
-    console.error(err);
-    res.sendStatus(500);
+    console.error(err)
+    res.sendStatus(500)
   }
-});
+})
 
 // Accepts GET requests at the /webhook endpoint. You need this URL to setup webhook initially.
-app.get("/api/webhook", (req, res) => {
-  const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+app.get('/api/webhook', (req, res) => {
+  const VERIFY_TOKEN = process.env.VERIFY_TOKEN
 
   // Parse params from the webhook verification request
-  let mode = req.query["hub.mode"];
-  let token = req.query["hub.verify_token"];
-  let challenge = req.query["hub.challenge"];
+  let mode = req.query['hub.mode']
+  let token = req.query['hub.verify_token']
+  let challenge = req.query['hub.challenge']
 
-  console.log("PAR" + JSON.stringify(req.query));
+  console.log('PAR' + JSON.stringify(req.query))
 
   // Check if a token and mode were sent
   if (!mode || !token) {
-    return res.status(403).send({ error: "Missing mode or token" });
+    return res.status(403).send({ error: 'Missing mode or token' })
   }
 
   // Check the mode and token sent are correct
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
     // Respond with 200 OK and challenge token from the request
-    console.log("WEBHOOK_VERIFIED");
-    return res.status(200).send(challenge);
+    console.log('WEBHOOK_VERIFIED')
+    return res.status(200).send(challenge)
   } else {
     // Responds with '403 Forbidden' if verify tokens do not match
-    return res.sendStatus(403);
+    return res.sendStatus(403)
   }
-});
+})
 
 // Sets server port and logs message on success
 app.listen(process.env.PORT || 8081, () =>
-  console.log("Whatsapp Connector is listening")
-);
+  console.log('Whatsapp Connector is listening'),
+)
